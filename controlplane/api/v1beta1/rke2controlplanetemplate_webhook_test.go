@@ -43,6 +43,45 @@ func TestRKE2ControlPlaneTemplateValidateCreate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "allow RKE2ControlPlaneTemplate with empty Version",
+			inputTemplate: &RKE2ControlPlaneTemplate{
+				Spec: RKE2ControlPlaneTemplateSpec{
+					Template: RKE2ControlPlaneTemplateResource{
+						Spec: RKE2ControlPlaneSpec{
+							Version: "",
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "allow RKE2ControlPlaneTemplate with parsable Version",
+			inputTemplate: &RKE2ControlPlaneTemplate{
+				Spec: RKE2ControlPlaneTemplateSpec{
+					Template: RKE2ControlPlaneTemplateResource{
+						Spec: RKE2ControlPlaneSpec{
+							Version: "v1.2.3+rke2r1",
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "don't allow RKE2ControlPlaneTemplate with unparsable Version",
+			inputTemplate: &RKE2ControlPlaneTemplate{
+				Spec: RKE2ControlPlaneTemplateSpec{
+					Template: RKE2ControlPlaneTemplateResource{
+						Spec: RKE2ControlPlaneSpec{
+							Version: "v1.2.3",
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
 	}
 	for _, test := range tests {
 		tt := test

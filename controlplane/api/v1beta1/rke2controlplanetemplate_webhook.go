@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	"errors"
+	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -59,6 +60,7 @@ func (r *RKE2ControlPlaneTemplate) ValidateCreate() (admission.Warnings, error) 
 	allErrs = append(allErrs, bootstrapv1.ValidateRKE2ConfigSpec(r.Name, &r.Spec.Template.Spec.RKE2ConfigSpec)...)
 	allErrs = append(allErrs, r.validateCNI()...)
 	allErrs = append(allErrs, r.validateRegistrationMethod()...)
+	allErrs = append(allErrs, r.validateVersion()...)
 
 	if len(allErrs) == 0 {
 		return nil, nil
@@ -80,6 +82,7 @@ func (r *RKE2ControlPlaneTemplate) ValidateUpdate(old runtime.Object) (admission
 
 	allErrs = append(allErrs, bootstrapv1.ValidateRKE2ConfigSpec(r.Name, &r.Spec.Template.Spec.RKE2ConfigSpec)...)
 	allErrs = append(allErrs, r.validateCNI()...)
+	allErrs = append(allErrs, r.validateVersion()...)
 
 	if r.Spec.Template.Spec.RegistrationMethod != oldControlplane.Spec.Template.Spec.RegistrationMethod {
 		allErrs = append(allErrs,
@@ -102,30 +105,27 @@ func (r *RKE2ControlPlaneTemplate) ValidateDelete() (admission.Warnings, error) 
 }
 
 func (r *RKE2ControlPlaneTemplate) validateCNI() field.ErrorList {
-	var allErrs field.ErrorList
-
-	spec := r.Spec.Template.Spec
-
-	if spec.ServerConfig.CNIMultusEnable && r.Spec.Template.Spec.ServerConfig.CNI == "" {
-		allErrs = append(allErrs,
-			field.Invalid(field.NewPath("spec", "serverConfig", "cni"),
-				r.Spec.Template.Spec.ServerConfig.CNI, "must be specified when cniMultusEnable is true"))
+	allErrs := validateCNI(r.Spec.Template.Spec)
+	for _, fieldError := range allErrs {
+		fieldError.Field = fmt.Sprintf("spec.template.%s", fieldError.Field)
 	}
 
 	return allErrs
 }
 
 func (r *RKE2ControlPlaneTemplate) validateRegistrationMethod() field.ErrorList {
-	var allErrs field.ErrorList
+	allErrs := validateRegistrationMethod(r.Spec.Template.Spec)
+	for _, fieldError := range allErrs {
+		fieldError.Field = fmt.Sprintf("spec.template.%s", fieldError.Field)
+	}
 
-	spec := r.Spec.Template.Spec
+	return allErrs
+}
 
-	if spec.RegistrationMethod == RegistrationMethodAddress {
-		if spec.RegistrationAddress == "" {
-			allErrs = append(allErrs,
-				field.Invalid(field.NewPath("spec.registrationAddress"),
-					spec.RegistrationAddress, "registrationAddress must be supplied when using registration method 'address'"))
-		}
+func (r *RKE2ControlPlaneTemplate) validateVersion() field.ErrorList {
+	allErrs := validateVersion(r.Spec.Template.Spec)
+	for _, fieldError := range allErrs {
+		fieldError.Field = fmt.Sprintf("spec.template.%s", fieldError.Field)
 	}
 
 	return allErrs
