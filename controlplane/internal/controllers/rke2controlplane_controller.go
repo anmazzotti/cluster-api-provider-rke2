@@ -258,6 +258,7 @@ func (r *RKE2ControlPlaneReconciler) SetupWithManager(ctx context.Context, mgr c
 
 	r.controller = c
 	r.recorder = mgr.GetEventRecorderFor("rke2-control-plane-controller")
+	r.ssaCache = ssa.NewCache("rke2-control-plane")
 
 	// Set up a clusterCache to provide to controllers
 	// requiring a connection to a remote cluster
@@ -503,10 +504,6 @@ func (r *RKE2ControlPlaneReconciler) reconcileNormal(
 		return result, err
 	}
 
-	if err := r.syncMachines(ctx, rke2.ControlPlane{}); err != nil {
-		return ctrl.Result{}, errors.Wrap(err, "failed to sync Machines")
-	}
-
 	controlPlaneMachines, err := r.managementClusterUncached.GetMachinesForCluster(
 		ctx,
 		util.ObjectKey(cluster),
@@ -529,6 +526,10 @@ func (r *RKE2ControlPlaneReconciler) reconcileNormal(
 		logger.Error(err, "failed to initialize control plane")
 
 		return ctrl.Result{}, err
+	}
+
+	if err := r.syncMachines(ctx, controlPlane); err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to sync Machines")
 	}
 
 	// Aggregate the operational state of all the machines; while aggregating we are adding the
@@ -629,7 +630,7 @@ func (r *RKE2ControlPlaneReconciler) GetWorkloadCluster(ctx context.Context, con
 // reconcileEtcdMembers ensures the number of etcd members is in sync with the number of machines/nodes.
 // This is usually required after a machine deletion.
 //
-// NOTE: this func uses KCP conditions, it is required to call reconcileControlPlaneConditions before this.
+// NOTE: this func uses RKE2ControlPlane conditions, it is required to call reconcileControlPlaneConditions before this.
 func (r *RKE2ControlPlaneReconciler) reconcileEtcdMembers(ctx context.Context, controlPlane *rke2.ControlPlane) error {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -1106,20 +1107,41 @@ func (r *RKE2ControlPlaneReconciler) getWorkloadCluster(ctx context.Context, clu
 	return workloadCluster, nil
 }
 
-// syncMachines updates Machines, InfrastructureMachines and Rke2Configs to propagate in-place mutable fields from KCP.
-// Note: It also cleans up managed fields of all Machines so that Machines that were
-// created/patched before (< v1.4.0)“ the controller adopted Server-Side-Apply (SSA) can also work with SSA.
+// syncMachines updates Machines, InfrastructureMachines and Rke2Configs to propagate in-place mutable fields from RKE2ControlPlane.
 // Note: For InfrastructureMachines and Rke2Configs it also drops ownership of "metadata.labels" and
 // "metadata.annotations" from "manager" so that "rke2controlplane" can own these fields and can work with SSA.
 // Otherwise, fields would be co-owned by our "old" "manager" and "rke2controlplane" and then we would not be
 // able to e.g. drop labels and annotations.
-func (r *RKE2ControlPlaneReconciler) syncMachines(ctx context.Context, controlPlane rke2.ControlPlane) error {
+func (r *RKE2ControlPlaneReconciler) syncMachines(ctx context.Context, controlPlane *rke2.ControlPlane) error {
 	patchHelpers := map[string]*patch.Helper{}
 
 	for machineName := range controlPlane.Machines {
 		m := controlPlane.Machines[machineName]
-		// If the machine is already being deleted, we don't need to update it.
+		// If the Machine is already being deleted, we only need to sync
+		// the subset of fields that impact tearing down the Machine.
 		if !m.DeletionTimestamp.IsZero() {
+			patchHelper, err := patch.NewHelper(m, r.Client)
+			if err != nil {
+				return err
+			}
+
+			// Set all other in-place mutable fields that impact the ability to tear down existing machines.
+			m.Spec.NodeDrainTimeout = controlPlane.RCP.Spec.MachineTemplate.NodeDrainTimeout
+			m.Spec.NodeDeletionTimeout = controlPlane.RCP.Spec.MachineTemplate.NodeDeletionTimeout
+			m.Spec.NodeVolumeDetachTimeout = controlPlane.RCP.Spec.MachineTemplate.NodeVolumeDetachTimeout
+
+			if err := patchHelper.Patch(ctx, m); err != nil {
+				return err
+			}
+
+			controlPlane.Machines[machineName] = m
+			patchHelper, err = patch.NewHelper(m, r.Client)
+			if err != nil { //nolint:wsl
+				return err
+			}
+
+			patchHelpers[machineName] = patchHelper
+
 			continue
 		}
 
@@ -1155,32 +1177,40 @@ func (r *RKE2ControlPlaneReconciler) syncMachines(ctx context.Context, controlPl
 			{"f:metadata", "f:annotations"},
 			{"f:metadata", "f:labels"},
 		}
-		infraMachine := controlPlane.InfraResources[machineName]
-		// Cleanup managed fields of all InfrastructureMachines to drop ownership of labels and annotations
-		// from "manager". We do this so that InfrastructureMachines that are created using the Create method
-		// can also work with SSA. Otherwise, labels and annotations would be co-owned by our "old" "manager"
-		// and "rke2-kubeadmcontrolplane" and then we would not be able to e.g. drop labels and annotations.
-		if err := ssa.DropManagedFields(ctx, r.Client, infraMachine, rke2ManagerName, labelsAndAnnotationsManagedFieldPaths); err != nil {
-			return errors.Wrapf(err, "failed to clean up managedFields of InfrastructureMachine %s", klog.KObj(infraMachine))
-		}
-		// Update in-place mutating fields on InfrastructureMachine.
-		if err := r.UpdateExternalObject(ctx, infraMachine, controlPlane.RCP, controlPlane.Cluster); err != nil {
-			return errors.Wrapf(err, "failed to update InfrastructureMachine %s", klog.KObj(infraMachine))
+		infraMachine, infraMachineFound := controlPlane.InfraResources[machineName]
+		// Only update the InfraMachine if it is already found, otherwise just skip it.
+		// This could happen e.g. if the cache is not up-to-date yet.
+		if infraMachineFound {
+			// Cleanup managed fields of all InfrastructureMachines to drop ownership of labels and annotations
+			// from "manager". We do this so that InfrastructureMachines that are created using the Create method
+			// can also work with SSA. Otherwise, labels and annotations would be co-owned by our "old" "manager"
+			// and "rke2-controlplane" and then we would not be able to e.g. drop labels and annotations.
+			if err := ssa.DropManagedFields(ctx, r.Client, infraMachine, rke2ManagerName, labelsAndAnnotationsManagedFieldPaths); err != nil {
+				return errors.Wrapf(err, "failed to clean up managedFields of InfrastructureMachine %s", klog.KObj(infraMachine))
+			}
+			// Update in-place mutating fields on InfrastructureMachine.
+			if err := r.UpdateExternalObject(ctx, infraMachine, controlPlane.RCP, controlPlane.Cluster); err != nil {
+				return errors.Wrapf(err, "failed to update InfrastructureMachine %s", klog.KObj(infraMachine))
+			}
 		}
 
-		rke2Config := controlPlane.Rke2Configs[machineName]
-		// Note: Set the GroupVersionKind because updateExternalObject depends on it.
-		rke2Config.SetGroupVersionKind(m.Spec.Bootstrap.ConfigRef.GroupVersionKind())
-		// Cleanup managed fields of all Rke2Configs to drop ownership of labels and annotations
-		// from "manager". We do this so that Rke2Configs that are created using the Create method
-		// can also work with SSA. Otherwise, labels and annotations would be co-owned by our "old" "manager"
-		// and "rke2controlplane" and then we would not be able to e.g. drop labels and annotations.
-		if err := ssa.DropManagedFields(ctx, r.Client, rke2Config, rke2ManagerName, labelsAndAnnotationsManagedFieldPaths); err != nil {
-			return errors.Wrapf(err, "failed to clean up managedFields of KubeadmConfig %s", klog.KObj(rke2Config))
-		}
-		// Update in-place mutating fields on BootstrapConfig.
-		if err := r.UpdateExternalObject(ctx, rke2Config, controlPlane.RCP, controlPlane.Cluster); err != nil {
-			return errors.Wrapf(err, "failed to update Rke2Config %s", klog.KObj(rke2Config))
+		rke2Config, rke2ConfigFound := controlPlane.Rke2Configs[machineName]
+		// Only update the RKE2Config if it is already found, otherwise just skip it.
+		// This could happen e.g. if the cache is not up-to-date yet.
+		if rke2ConfigFound {
+			// Note: Set the GroupVersionKind because updateExternalObject depends on it.
+			rke2Config.SetGroupVersionKind(m.Spec.Bootstrap.ConfigRef.GroupVersionKind())
+			// Cleanup managed fields of all RKE2Configs to drop ownership of labels and annotations
+			// from "manager". We do this so that RKE2Configs that are created using the Create method
+			// can also work with SSA. Otherwise, labels and annotations would be co-owned by our "old" "manager"
+			// and "rke2-controlplane" and then we would not be able to e.g. drop labels and annotations.
+			if err := ssa.DropManagedFields(ctx, r.Client, rke2Config, rke2ManagerName, labelsAndAnnotationsManagedFieldPaths); err != nil {
+				return errors.Wrapf(err, "failed to clean up managedFields of RKE2Config %s", klog.KObj(rke2Config))
+			}
+			// Update in-place mutating fields on BootstrapConfig.
+			if err := r.UpdateExternalObject(ctx, rke2Config, controlPlane.RCP, controlPlane.Cluster); err != nil {
+				return errors.Wrapf(err, "failed to update RKE2Config %s", klog.KObj(rke2Config))
+			}
 		}
 	}
 	// Update the patch helpers.
