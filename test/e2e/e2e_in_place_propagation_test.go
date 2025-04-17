@@ -122,7 +122,6 @@ var _ = Describe("Workload cluster creation", func() {
 				Namespace: result.Cluster.Namespace,
 			}, e2eConfig.GetIntervals(specName, "wait-cluster")...)
 
-			// 1. Get all machines (already helper)
 			By("Fetching all Machines")
 			machineList := GetMachinesByCluster(ctx, GetMachinesByClusterInput{
 				Lister:      bootstrapClusterProxy.GetClient(),
@@ -131,17 +130,23 @@ var _ = Describe("Workload cluster creation", func() {
 			})
 			Expect(machineList.Items).ShouldNot(BeEmpty(), "There must be at least one Machine")
 
-			// 2. Edit the RKE2 control plane with new nodetimeouts, and machineTemplate.meta.annotations|labels
-			By("Editing the RKE2 control plane")
+			By("Fetch RKE2 control plane to patch it with new labels, annotations, and timeouts")
 			rke2ControlPlane := GetRKE2ControlPlaneByCluster(ctx, GetRKE2ControlPlaneByClusterInput{
 				Lister:      bootstrapClusterProxy.GetClient(),
 				ClusterName: result.Cluster.Name,
 				Namespace:   result.Cluster.Namespace,
 			})
 			Expect(rke2ControlPlane).ToNot(BeNil(), "There must be a RKE2 control plane")
-			Expect(rke2ControlPlane.Spec.MachineTemplate).ToNot(BeNil(), "There must be a MachineTemplate in the RKE2 control plane")
-			Expect(rke2ControlPlane.Spec.MachineTemplate.ObjectMeta).ToNot(BeNil(), "There must be a ObjectMeta in the MachineTemplate of the RKE2 control plane")
-			Expect(rke2ControlPlane.Spec.MachineTemplate.ObjectMeta.Labels).ToNot(BeNil(), "There must be a Labels in the ObjectMeta of the MachineTemplate of the RKE2 control plane")
+			Expect(rke2ControlPlane.Spec.MachineTemplate).ToNot(BeNil(), "MachineTemplate must not be nil")
+			Expect(rke2ControlPlane.Spec.MachineTemplate.ObjectMeta).ToNot(BeNil(), "ObjectMeta in MachineTemplate must not be nil")
+
+			// Ensure labels and annotations maps are initialized
+			if rke2ControlPlane.Spec.MachineTemplate.ObjectMeta.Labels == nil {
+				rke2ControlPlane.Spec.MachineTemplate.ObjectMeta.Labels = make(map[string]string)
+			}
+			if rke2ControlPlane.Spec.MachineTemplate.ObjectMeta.Annotations == nil {
+				rke2ControlPlane.Spec.MachineTemplate.ObjectMeta.Annotations = make(map[string]string)
+			}
 
 			// Set new labels and annotations
 			rke2ControlPlane.Spec.MachineTemplate.ObjectMeta.Labels["test-label"] = "test-label-value"
@@ -154,13 +159,18 @@ var _ = Describe("Workload cluster creation", func() {
 			rke2ControlPlane.Spec.MachineTemplate.NodeDeletionTimeout = duration240s
 			rke2ControlPlane.Spec.MachineTemplate.NodeVolumeDetachTimeout = duration480s
 
-			// 3. (Consistently) Verify rollout did not happen (already helper)
+			// Patch the RKE2 control plane
+			patch := client.MergeFrom(rke2ControlPlane.DeepCopy())
+			Expect(bootstrapClusterProxy.GetClient().Patch(ctx, rke2ControlPlane, patch)).To(Succeed(), "Failed to patch the RKE2 control plane")
+
+			// Ensure no Machine rollout is triggered
 			EnsureNoMachineRollout(ctx, GetMachinesByClusterInput{
 				Lister:      bootstrapClusterProxy.GetClient(),
 				ClusterName: result.Cluster.Name,
 				Namespace:   result.Cluster.Namespace,
 			}, machineList)
-			// 4. (Eventually) Check nodetimeouts are propagated on Machines
+
+			// Check NodeDrainTimeout, NodeDeletionTimeout and NodeVolumeDetachTimeout values are propagated to Machines
 			Eventually(func() error {
 				machineList := GetMachinesByCluster(ctx, GetMachinesByClusterInput{
 					Lister:      bootstrapClusterProxy.GetClient(),
@@ -181,7 +191,7 @@ var _ = Describe("Workload cluster creation", func() {
 				return nil
 			}, 5*time.Minute, 10*time.Second).Should(Succeed(), "Node timeouts are not propagated to Machines")
 
-			// 5. (Eventually) Check labels/annotations are propagated on Machines, InfraMachines, and RKE2Configs(associated to Machines)
+			// Check labels/annotations are propagated to Machines and associated InfraMachines/RKE2Configs.
 			By("Verifying labels and annotations are propagated to Machines, InfraMachines, and RKE2Configs")
 			expectedLabelKey := "test-label"
 			expectedLabelValue := "test-label-value"
@@ -260,6 +270,7 @@ var _ = Describe("Workload cluster creation", func() {
 	})
 })
 
+// isOwnedBy checks if the object is owned by the specified owner.
 func isOwnedBy(obj metav1.Object, owner metav1.Object) bool {
 	for _, ref := range obj.GetOwnerReferences() {
 		if ref.UID == owner.GetUID() {
