@@ -140,6 +140,7 @@ var _ = Describe("Workload cluster creation", func() {
 			Expect(rke2ControlPlane.Spec.MachineTemplate).ToNot(BeNil(), "MachineTemplate must not be nil")
 			Expect(rke2ControlPlane.Spec.MachineTemplate.ObjectMeta).ToNot(BeNil(), "ObjectMeta in MachineTemplate must not be nil")
 
+			rke2ControlPlaneOriginal := rke2ControlPlane.DeepCopy()
 			// Ensure labels and annotations maps are initialized
 			if rke2ControlPlane.Spec.MachineTemplate.ObjectMeta.Labels == nil {
 				rke2ControlPlane.Spec.MachineTemplate.ObjectMeta.Labels = make(map[string]string)
@@ -160,8 +161,8 @@ var _ = Describe("Workload cluster creation", func() {
 			rke2ControlPlane.Spec.MachineTemplate.NodeVolumeDetachTimeout = duration480s
 
 			// Patch the RKE2 control plane
-			patch := client.MergeFrom(rke2ControlPlane.DeepCopy())
-			Expect(bootstrapClusterProxy.GetClient().Patch(ctx, rke2ControlPlane, patch)).To(Succeed(), "Failed to patch the RKE2 control plane")
+			By("Patching RKE2 with new labels, annotations, and timeouts")
+			Expect(bootstrapClusterProxy.GetClient().Patch(ctx, rke2ControlPlane, client.MergeFrom(rke2ControlPlaneOriginal))).To(Succeed(), "Failed to patch the RKE2 control plane")
 
 			// Ensure no Machine rollout is triggered
 			EnsureNoMachineRollout(ctx, GetMachinesByClusterInput{
@@ -171,6 +172,7 @@ var _ = Describe("Workload cluster creation", func() {
 			}, machineList)
 
 			// Check NodeDrainTimeout, NodeDeletionTimeout and NodeVolumeDetachTimeout values are propagated to Machines
+			By("Check NodeDrainTimeout, NodeDeletionTimeout and NodeVolumeDetachTimeout values are propagated to Machines")
 			Eventually(func() error {
 				machineList := GetMachinesByCluster(ctx, GetMachinesByClusterInput{
 					Lister:      bootstrapClusterProxy.GetClient(),
