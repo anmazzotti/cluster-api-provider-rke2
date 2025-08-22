@@ -215,7 +215,7 @@ runcmd:
 `
 
 	It("Should remove the runcmd, write_files and ntp lines", func() {
-		cleanCloudInitData, err := cleanupAdditionalCloudInit(cloudInitData)
+		cleanCloudInitData, err := CleanupAdditionalCloudInit(cloudInitData)
 		Expect(cleanCloudInitData).To(Equal(`hello: world
 users:
   - name: rke2

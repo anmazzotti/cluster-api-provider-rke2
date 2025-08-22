@@ -142,7 +142,7 @@ func generate(kind string, tpl string, data interface{}) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func cleanupAdditionalCloudInit(cloudInitData string) (string, error) {
+func CleanupAdditionalCloudInit(cloudInitData string) (string, error) {
 	m := make(map[string]interface{})
 
 	if err := yaml.Unmarshal([]byte(cloudInitData), m); err != nil {
@@ -170,7 +170,7 @@ func cleanupAdditionalCloudInit(cloudInitData string) (string, error) {
 	return res, nil
 }
 
-func cleanupArbitraryData(arbitraryData map[string]string) error {
+func CleanupArbitraryData(arbitraryData map[string]string) error {
 	// Remove ignored fields from the map
 	for _, field := range ignoredCloudInitFields {
 		delete(arbitraryData, field)

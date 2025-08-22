@@ -92,6 +92,16 @@ func DefaultRKE2ConfigSpec(spec *RKE2ConfigSpec) {
 		if err := CorrectArbitraryData(spec.AgentConfig.AdditionalUserData.Data); err != nil {
 			rke2ConfigLogger.Error(err, "failed to correct the additional user data for RKE2ConfigSpec")
 		}
+
+		// if err := cloudinit.CleanupArbitraryData(spec.AgentConfig.AdditionalUserData.Data); err != nil {
+		// 	rke2ConfigLogger.Error(err, "failed to cleanup the additional user data for RKE2ConfigSpec")
+		// }
+	}
+
+	if spec.AgentConfig.AdditionalUserData.Config != "" {
+		// if err := cloudinit.CleanupAdditionalCloudInit(spec.AgentConfig.AdditionalUserData.Data); err != nil {
+		// 	rke2ConfigLogger.Error(err, "failed to cleanup the additional user config for RKE2ConfigSpec")
+		// }
 	}
 }
 
